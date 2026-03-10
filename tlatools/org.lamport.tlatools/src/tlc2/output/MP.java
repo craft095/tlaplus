@@ -219,6 +219,7 @@ public class MP
 	private static final ThreadLocal<DecimalFormat> DF = ThreadLocal.withInitial(() -> new DecimalFormat("###,###.###"));
 	
 	private static final java.util.Set<Integer> SUPPRESSED = new HashSet<>();
+	private static final java.util.Set<Integer> WARNING_AS_ERRORS = new HashSet<>();
 	
 	/**
 	 * By default, do not run in debug mode which means full stack traces do not
@@ -246,6 +247,61 @@ public class MP
     
     public static boolean isSuppressed(int messageCode) {
     	return SUPPRESSED.contains(messageCode);
+    }
+
+    /**
+     * Adds all codes in {@code codes} to the suppressed set.  Warnings whose
+     * code is suppressed are never printed to the console, though they are
+     * still recorded by the {@link BroadcastMessagePrinterRecorder}.
+     */
+    public static void addSuppressed(java.util.Collection<Integer> codes) {
+        SUPPRESSED.addAll(codes);
+    }
+
+    /**
+     * Returns an unmodifiable view of the set of currently suppressed message
+     * codes.  Populated by the {@code -suppressMessages} CLI flag.
+     */
+    public static java.util.Set<Integer> getSuppressedCodes() {
+        return java.util.Collections.unmodifiableSet(SUPPRESSED);
+    }
+
+    /**
+     * Adds all codes in {@code codes} to the warning-as-error set.  When
+     * {@link #printWarning} is called for a code in this set it delegates to
+     * {@link util.Assert#fail} instead of printing a warning message, causing
+     * TLC to abort with the associated error code.
+     */
+    public static void addWarningsAsErrors(java.util.Collection<Integer> codes) {
+        WARNING_AS_ERRORS.addAll(codes);
+    }
+
+    /**
+     * Returns {@code true} if warnings with {@code messageCode} should be
+     * elevated to errors (i.e. the code was registered via
+     * {@link #addWarningsAsErrors}).
+     */
+    public static boolean isWarningAsError(int messageCode) {
+        return WARNING_AS_ERRORS.contains(messageCode);
+    }
+
+    /**
+     * Returns an unmodifiable view of the set of codes that are currently
+     * configured to be treated as errors.  Populated by the
+     * {@code -warningsAsErrors} CLI flag.
+     */
+    public static java.util.Set<Integer> getWarningsAsErrorCodes() {
+        return java.util.Collections.unmodifiableSet(WARNING_AS_ERRORS);
+    }
+
+    /**
+     * Clears all per-code warning controls ({@link #SUPPRESSED} and
+     * {@link #WARNING_AS_ERRORS}).  Intended for use by tests to restore MP to
+     * a clean state between test cases.
+     */
+    public static void resetWarningControl() {
+        SUPPRESSED.clear();
+        WARNING_AS_ERRORS.clear();
     }
 
     /**
@@ -1776,7 +1832,7 @@ public class MP
      */
     public static void printWarning(int errorCode, String... parameters)
     {
-    	if (Boolean.getBoolean(MP.class.getName() + ".warning2error")) {
+    	if (Boolean.getBoolean(MP.class.getName() + ".warning2error") || isWarningAsError(errorCode)) {
     		Assert.fail(errorCode, parameters);
     	}
     	recorder.record(errorCode, (Object[]) parameters);
@@ -1805,7 +1861,7 @@ public class MP
      */
     public static void printWarning(int errorCode, String parameters, Throwable e)
     {
-    	if (Boolean.getBoolean(MP.class.getName() + ".warning2error")) {
+    	if (Boolean.getBoolean(MP.class.getName() + ".warning2error") || isWarningAsError(errorCode)) {
     		Assert.fail(errorCode, e);
     	}
     	recorder.record(errorCode, parameters, e);

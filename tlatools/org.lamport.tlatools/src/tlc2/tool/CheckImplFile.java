@@ -10,11 +10,16 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.PrintWriter;
 
+import java.util.Set;
+import java.util.stream.Collectors;
+
 import tla2sany.drivers.SANY;
+import tla2sany.drivers.SanySettings;
 import tla2sany.modanalyzer.SpecObj;
 import tla2sany.output.LogLevel;
 import tla2sany.output.SanyOutput;
 import tla2sany.output.SimpleSanyOutput;
+import tla2sany.semantic.ErrorCode;
 import tla2sany.semantic.ExternalModuleTable;
 import tla2sany.semantic.ModuleNode;
 import tla2sany.semantic.OpDefNode;
@@ -89,6 +94,37 @@ public class CheckImplFile extends CheckImpl
         this.tocnt++;
     }
 
+    /**
+     * Builds a {@link SanySettings} for parsing a trace file, forwarding any
+     * SANY-range codes from {@link MP}'s suppressed and warning-as-error sets.
+     * Uses {@link SanySettings#forExternalCaller} so that parse errors are
+     * reported via the spec object rather than by throwing
+     * {@link tla2sany.drivers.SANYExitException}.
+     */
+    private static SanySettings buildSanySettings() {
+        final Set<Integer> sanySupp = MP.getSuppressedCodes().stream()
+                .filter(c -> isSanyCode(c))
+                .collect(Collectors.toSet());
+        final Set<Integer> sanyWAE = MP.getWarningsAsErrorCodes().stream()
+                .filter(c -> isSanyCode(c))
+                .collect(Collectors.toSet());
+        return SanySettings.forExternalCaller(sanySupp, sanyWAE);
+    }
+
+    /**
+     * Returns {@code true} if {@code code} corresponds to a known SANY
+     * {@link ErrorCode}, i.e. it falls in the SANY code range and can be
+     * validated by {@link ErrorCode#fromStandardValue}.
+     */
+    private static boolean isSanyCode(final int code) {
+        try {
+            ErrorCode.fromStandardValue(code);
+            return true;
+        } catch (final IllegalArgumentException e) {
+            return false;
+        }
+    }
+
     /* This method reads in a trace from a file. */
     public final boolean getTrace()
     {
@@ -99,14 +135,11 @@ public class CheckImplFile extends CheckImpl
             return false;
 
         // Parse the trace file:
-        // REFACTOR: Call SANY.frontendparse
         SpecObj spec = new SpecObj(rfname, null);
         try
         {
             SanyOutput out = new SimpleSanyOutput(ToolIO.out, LogLevel.INFO);
-            SANY.frontEndInitialize();
-            SANY.frontEndParse(spec, out);
-            SANY.frontEndSemanticAnalysis(spec, out, true);
+            SANY.parse(spec, rfname, out, buildSanySettings());
         } catch (Throwable e)
         {
             String msg = (e.getMessage()==null)?e.toString():e.getMessage();

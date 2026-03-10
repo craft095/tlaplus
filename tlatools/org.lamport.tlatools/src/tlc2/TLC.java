@@ -129,6 +129,11 @@ public class TLC {
      */
 	private long startTime;
 
+    /** Codes whose warnings should be suppressed (not printed). */
+    private final Set<Integer> suppressedCodes = new HashSet<>();
+    /** Codes whose warnings should be elevated to errors (cause failure). */
+    private final Set<Integer> warningsAsErrorCodes = new HashSet<>();
+
 	/**
 	 * Name of main TLA+ specification file.
 	 */
@@ -475,6 +480,26 @@ public class TLC {
             {
                 index++;
                 TLCGlobals.warn = false;
+            } else if (args[index].equals("-suppressMessages"))
+            {
+                index++;
+                if (index >= args.length) {
+                    printErrorMsg("Error: -suppressMessages requires a comma-separated list of integer codes.");
+                    return false;
+                }
+                if (!parseWarningCodes(args[index++], suppressedCodes, false)) {
+                    return false;
+                }
+            } else if (args[index].equals("-warningsAsErrors"))
+            {
+                index++;
+                if (index >= args.length) {
+                    printErrorMsg("Error: -warningsAsErrors requires a comma-separated list of integer codes.");
+                    return false;
+                }
+                if (!parseWarningCodes(args[index++], warningsAsErrorCodes, true)) {
+                    return false;
+                }
             } else if (args[index].equals("-gzip"))
             {
                 index++;
@@ -1115,7 +1140,21 @@ public class TLC {
                 }
             }
         }
-		
+
+        // Conflict check: -nowarning cannot be combined with per-code controls.
+        if (!TLCGlobals.warn && (!suppressedCodes.isEmpty() || !warningsAsErrorCodes.isEmpty())) {
+            printErrorMsg("Error: -nowarning cannot be combined with -suppressMessages or -warningsAsErrors.");
+            return false;
+        }
+
+        // Apply per-code warning controls to MP and (for SANY-range codes) SANY.
+        if (!suppressedCodes.isEmpty()) {
+            MP.addSuppressed(suppressedCodes);
+        }
+        if (!warningsAsErrorCodes.isEmpty()) {
+            MP.addWarningsAsErrors(warningsAsErrorCodes);
+        }
+
         startTime = System.currentTimeMillis();
 
 		if (mainFile == null) {
@@ -1539,7 +1578,55 @@ public class TLC {
         printWelcome();
         MP.printError(EC.WRONG_COMMANDLINE_PARAMS_TLC, msg);
     }
-    
+
+    /**
+     * Parses a comma-separated list of integer message codes into {@code target}.
+     * Each code must be known to TLC ({@link EC#isKnownCode}) or to SANY
+     * ({@link tla2sany.semantic.ErrorCode#fromStandardValue}).
+     * When {@code warningsOnly} is {@code true} each code must additionally be a
+     * warning-level SANY code; non-warning SANY codes and TLC codes that happen
+     * not to be warnings are accepted (TLC has no per-code level metadata).
+     *
+     * @return {@code true} on success; prints an error message and returns
+     *         {@code false} on the first invalid token.
+     */
+    private boolean parseWarningCodes(final String arg, final Set<Integer> target,
+                                      final boolean warningsOnly) {
+        for (String token : arg.split(",")) {
+            token = token.trim();
+            if (token.isEmpty()) {
+                continue;
+            }
+            final int code;
+            try {
+                code = Integer.parseInt(token);
+            } catch (final NumberFormatException e) {
+                printErrorMsg("Error: expected an integer message code, got: " + token);
+                return false;
+            }
+            // Validate: must be a known TLC code or a known SANY code.
+            boolean knownToEc   = EC.isKnownCode(code);
+            boolean knownToSany = false;
+            tla2sany.semantic.ErrorCode sanyCode = null;
+            try {
+                sanyCode = tla2sany.semantic.ErrorCode.fromStandardValue(code);
+                knownToSany = true;
+            } catch (final IllegalArgumentException ignored) {}
+
+            if (!knownToEc && !knownToSany) {
+                printErrorMsg("Error: unknown message code: " + code);
+                return false;
+            }
+            if (warningsOnly && knownToSany
+                    && sanyCode.getSeverityLevel() != tla2sany.semantic.ErrorCode.ErrorLevel.WARNING) {
+                printErrorMsg("Error: code " + code + " is not a warning-level code.");
+                return false;
+            }
+            target.add(code);
+        }
+        return true;
+    }
+
     /**
      * Prints the welcome message once per instance
      */
@@ -1718,6 +1805,14 @@ public class TLC {
 															+ "SPEC-directory/states if not specified", true));
     	sharedArguments.add(new UsageGenerator.Argument("-nowarning",
 														"disable all warnings; defaults to reporting warnings", true));
+    	sharedArguments.add(new UsageGenerator.Argument("-suppressMessages", "codes",
+														"suppress specific warning/message codes; comma-separated\n"
+															+ "list of integer codes; cannot be combined with -nowarning",
+														true));
+    	sharedArguments.add(new UsageGenerator.Argument("-warningsAsErrors", "codes",
+														"treat specific warnings as errors; comma-separated list of\n"
+															+ "integer codes; cannot be combined with -nowarning",
+														true));
     	sharedArguments.add(new UsageGenerator.Argument("-recover", "id",
 														"recover from the checkpoint with the specified id", true));
     	sharedArguments.add(new UsageGenerator.Argument("-terse",

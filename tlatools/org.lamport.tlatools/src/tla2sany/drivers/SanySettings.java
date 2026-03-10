@@ -131,6 +131,22 @@ public final class SanySettings {
   }
 
   /**
+   * Settings for use when SANY is called as a library by another tool that
+   * manages its own error reporting. Strict error codes are disabled so
+   * that {@link SANY#parse} does not throw {@link SANYExitException} on
+   * failure. All validation stages are enabled.
+   *
+   * @param suppressedCodes      message codes to silence; may be empty
+   * @param warningsAsErrorCodes warning codes to elevate to errors; may be empty
+   * @return settings appropriate for a caller that checks results itself
+   */
+  public static SanySettings forExternalCaller(
+      final Set<Integer> suppressedCodes,
+      final Set<Integer> warningsAsErrorCodes) {
+    return new SanySettings(false, true, true, true, true, suppressedCodes, warningsAsErrorCodes);
+  }
+
+  /**
    * Use this constructor if you want full control over SANY settings,
    * including per-code message suppression and warning elevation.
    */

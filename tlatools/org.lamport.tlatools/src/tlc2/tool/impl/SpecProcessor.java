@@ -43,12 +43,14 @@ import java.util.stream.Collectors;
 
 import tla2sany.drivers.FrontEndException;
 import tla2sany.drivers.SANY;
+import tla2sany.drivers.SanySettings;
 import tla2sany.drivers.SemanticException;
 import tla2sany.modanalyzer.SpecObj;
 import tla2sany.output.LogLevel;
 import tla2sany.output.SanyOutput;
 import tla2sany.output.SimpleSanyOutput;
 import tla2sany.parser.ParseException;
+import tla2sany.semantic.ErrorCode;
 import tla2sany.semantic.APSubstInNode;
 import tla2sany.semantic.AbortException;
 import tla2sany.semantic.AssumeNode;
@@ -389,6 +391,37 @@ public class SpecProcessor implements ValueConstants, ToolGlobals {
      * class) to override the corresponding TLA+ module.
      * @param mode 
      */
+    /**
+     * Builds a {@link SanySettings} for the current TLC run, forwarding any
+     * SANY-range suppressed/warning-as-error codes from {@link MP}.  Uses
+     * {@link SanySettings#forExternalCaller} so that parse errors are reported
+     * via the spec object rather than by throwing
+     * {@link tla2sany.drivers.SANYExitException}.
+     */
+    private static SanySettings buildSanySettings() {
+        final Set<Integer> sanySupp = MP.getSuppressedCodes().stream()
+                .filter(c -> isSanyCode(c))
+                .collect(Collectors.toSet());
+        final Set<Integer> sanyWAE = MP.getWarningsAsErrorCodes().stream()
+                .filter(c -> isSanyCode(c))
+                .collect(Collectors.toSet());
+        return SanySettings.forExternalCaller(sanySupp, sanyWAE);
+    }
+
+    /**
+     * Returns {@code true} if {@code code} corresponds to a known SANY
+     * {@link ErrorCode}, i.e. it falls in the SANY code range and can be
+     * validated by {@link ErrorCode#fromStandardValue}.
+     */
+    private static boolean isSanyCode(final int code) {
+        try {
+            ErrorCode.fromStandardValue(code);
+            return true;
+        } catch (final IllegalArgumentException e) {
+            return false;
+        }
+    }
+
     // SZ Feb 20, 2009: added support for existing specObj
     private final void processSpec(final Mode mode)
     {
@@ -409,7 +442,7 @@ public class SpecProcessor implements ValueConstants, ToolGlobals {
             // Only if something unexpected happens the
             // exception is thrown
             SanyOutput out = new SimpleSanyOutput(ps, LogLevel.INFO);
-            SANY.frontEndMain(specObj, this.rootFile, out);
+            SANY.parse(specObj, this.rootFile, out, buildSanySettings());
         } catch (FrontEndException e)
         {
         	if (ps instanceof DelayedPrintStream) {

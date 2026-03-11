@@ -5,13 +5,17 @@ package tla2sany.drivers;
 
 import java.io.PrintStream;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import tla2sany.explorer.Explorer;
 import tla2sany.explorer.ExplorerQuitException;
 import tla2sany.linter.Linter;
 import tla2sany.modanalyzer.ParseUnit;
 import tla2sany.modanalyzer.SpecObj;
+import tla2sany.semantic.ErrorCode;
 import tla2sany.output.LogLevel;
 import tla2sany.output.OutErrSanyOutput;
 import tla2sany.output.SanyOutput;
@@ -83,6 +87,12 @@ public class SANY {
     // true <=> error level should be reported as the tools'
     //          return value
 
+  private static Set<Integer> suppressedCodes = new HashSet<>();
+    // set of message codes to silence; populated by -suppressMessages CLI flag
+
+  private static Set<Integer> warningsAsErrorCodes = new HashSet<>();
+    // set of warning codes to elevate to errors; populated by -warningsAsErrors CLI flag
+
   /**
    * The default setting of whether to validate the root module's PlusCal
    * translation and warn if it is out of sync.
@@ -117,7 +127,9 @@ public class SANY {
         doSemanticAnalysis,
         doLevelChecking,
         doLinting,
-        doValidatePCalTranslationDefault
+        doValidatePCalTranslationDefault,
+        suppressedCodes,
+        warningsAsErrorCodes
       );
     return parse(spec, fileName, out, settings).code();
   }
@@ -173,15 +185,21 @@ public class SANY {
       frontEndInitialize();
     
       // **** Parsing 
-      frontEndParse(spec, out, settings.validatePCalTranslation);
+      frontEndParse(spec, out, settings.validatePCalTranslation, settings);
     
       // **** Semantic analysis and level checking
       if (settings.doSemanticAnalysis) 
-            {frontEndSemanticAnalysis(spec, out, settings.doLevelChecking);} ;
+            {frontEndSemanticAnalysis(spec, out, settings.doLevelChecking, settings);} ;
 
       // **** Linting
-      if (settings.doLinting) 
-            {frontEndLinting(spec, out); } ;
+      if (settings.doLinting) {
+        final int warnsBefore = spec.semanticErrors.getWarningDetails().size();
+        frontEndLinting(spec, out);
+        // Print linting warnings, respecting suppressed/elevated codes.
+        final List<ErrorDetails> allWarnings = spec.semanticErrors.getWarningDetails();
+        final List<ErrorDetails> lintingWarnings = allWarnings.subList(warnsBefore, allWarnings.size());
+        reportWarnings(out, filterVisibleMessages(lintingWarnings, settings), settings);
+      }
 
     }
     catch (ParseException pe) {
@@ -195,9 +213,52 @@ public class SANY {
       throw new FrontEndException(e);
     }
 
+    // If any warnings in warningsAsErrorCodes were encountered, treat as failure.
+    if (!settings.warningsAsErrorCodes.isEmpty()) {
+      final boolean parseWarningElevated = spec.parseErrors.getWarningDetails().stream()
+          .anyMatch(w -> isWarningElevated(w, settings));
+      final boolean semanticWarningElevated = spec.semanticErrors.getWarningDetails().stream()
+          .anyMatch(w -> isWarningElevated(w, settings));
+      if (parseWarningElevated || semanticWarningElevated) {
+        return SanyExitCode.SEMANTIC_ANALYSIS_OR_LEVEL_CHECKING_FAILURE;
+      }
+    }
+
     return settings.doStrictErrorCodes
         ? SanyExitCode.fromCode(spec.getErrorLevel())
         : SanyExitCode.OK;
+  }
+
+  /**
+   * Checks if a warning should be treated as an error.
+   */
+  private static boolean isWarningElevated(ErrorDetails warning, SanySettings settings) {
+    return settings != null && settings.warningsAsErrorCodes.contains(warning.getCode().getStandardValue());
+  }
+
+  /**
+   * Filters the visible messages based on the settings.
+   */
+  private static List<ErrorDetails> filterVisibleMessages(List<ErrorDetails> messages, SanySettings settings) {
+    final List<ErrorDetails> visibleMessages = (settings == null)
+    ? messages
+    : messages.stream()
+        .filter(w -> !settings.suppressedCodes.contains(w.getCode().getStandardValue()))
+        .collect(Collectors.toList());
+    return visibleMessages;
+  }
+
+  /**
+   * Reports the warnings to the output.
+   */
+  private static void reportWarnings(SanyOutput out, List<ErrorDetails> warnings, SanySettings settings) {
+    for (ErrorDetails warning : warnings) {
+      if (isWarningElevated(warning, settings)) {
+        out.log(LogLevel.ERROR, "Warning treated as error: %s\n\n\n", warning);
+      } else {
+        out.log(LogLevel.WARNING, "%s\n\n\n", warning);
+      }
+    }
   }
 
   /** 
@@ -235,6 +296,11 @@ public class SANY {
 
   public static void frontEndParse(SpecObj spec, SanyOutput out, boolean validatePCalTranslation) 
   throws ParseException {
+    frontEndParse(spec, out, validatePCalTranslation, null);
+  }
+
+  private static void frontEndParse(SpecObj spec, SanyOutput out, boolean validatePCalTranslation, SanySettings settings)
+  throws ParseException {
       /***********************************************************************
        * Modified on 12 May 2008 by LL to remove "throws AbortException",     *
        * since it catches all exceptions and turns them into                  *
@@ -246,11 +312,11 @@ public class SANY {
           spec.loadSpec(spec.getFileName(), spec.parseErrors, validatePCalTranslation, out);
 
           List<ErrorDetails> warnings = spec.parseErrors.getWarningDetails();
-          if (!warnings.isEmpty()) {
-            out.log(LogLevel.WARNING, "Warnings (%d) during syntax parsing of %s:\n\n", warnings.size(), spec.getFileName());
-            for (ErrorDetails warning : warnings) {
-              out.log(LogLevel.WARNING, "%s\n\n\n", warning);
-            }
+          // Filter and display warnings, respecting suppressed/elevated codes.
+          final List<ErrorDetails> visibleWarnings = filterVisibleMessages(warnings, settings);
+          if (!visibleWarnings.isEmpty()) {
+            out.log(LogLevel.WARNING, "Warnings (%d) during syntax parsing of %s:\n\n", visibleWarnings.size(), spec.getFileName());
+            reportWarnings(out, visibleWarnings, settings);
           }
 
           if (!spec.parseErrors.isSuccess()) 
@@ -294,6 +360,14 @@ public class SANY {
                                               SanyOutput out,
                                               boolean levelCheck) 
   throws SemanticException {
+    frontEndSemanticAnalysis(spec, out, levelCheck, null);
+  }
+
+  private static void frontEndSemanticAnalysis(SpecObj spec,
+                                              SanyOutput out,
+                                              boolean levelCheck,
+                                              SanySettings settings)
+  throws SemanticException {
     String      moduleStringName;
     TreeNode    syntaxTreeRoot;
     ExternalModuleTable externalModuleTable = spec.getExternalModuleTable();
@@ -314,7 +388,7 @@ public class SANY {
         // if semantic analysis has not already been done on this module
         if (externalModuleTable.getContext( UniqueString.uniqueStringOf( moduleStringName)) == null ) {
           parseUnit = (ParseUnit)spec.parseUnitContext.get(moduleStringName);;
-      
+
           // get reference to the syntax tree for the module
           syntaxTreeRoot = parseUnit.getParseTree();
 
@@ -362,8 +436,29 @@ public class SANY {
           }
 
           if (semanticErrors.getNumMessages() > 0) {
-            // TODO: split warnings & errors out into appropriate log level
-            out.log(LogLevel.ERROR, "Semantic errors:\n\n%s", semanticErrors);
+            // Print errors at ERROR level.
+            // Note: each out.log() call goes through println() which appends
+            // a newline, so we use one fewer trailing \n than Errors.toString()
+            // to produce identical output.
+            final List<ErrorDetails> errors = semanticErrors.getErrorDetails();
+            if (!errors.isEmpty()) {
+              out.log(LogLevel.ERROR, "Semantic errors:\n\n*** Errors: %d\n", errors.size());
+              for (ErrorDetails error : errors) {
+                out.log(LogLevel.ERROR, "%s\n\n", error);
+              }
+            }
+
+            // Print warnings, respecting suppressed/elevated codes
+            final List<ErrorDetails> allWarnings = semanticErrors.getWarningDetails();
+            final List<ErrorDetails> visibleWarnings = filterVisibleMessages(allWarnings, settings);
+            // Count non-elevated warnings to show correct header
+            final long normalCount = visibleWarnings.stream()
+                    .filter(w -> !isWarningElevated(w, settings))
+                    .count();
+            if (normalCount > 0) {
+              out.log(LogLevel.WARNING, "*** Warnings: %d\n", normalCount);
+            }
+            reportWarnings(out, visibleWarnings, settings);
 
             // indicate fatal error during semantic analysis or level-checking
             if ( semanticErrors.getNumErrors() > 0 ) {
@@ -428,6 +523,15 @@ public class SANY {
           "'2' Error during parsing.\n" +
           "'4' Error during semantic analysis or level-checking.", true));
       variant.add(new UsageGenerator.Argument(
+          "-suppressMessages", "codes",
+          "suppress specific warning/message codes; comma-separated list of\n" +
+          "integer codes; suppressed messages are not printed and do not\n" +
+          "cause SANY to fail", true));
+      variant.add(new UsageGenerator.Argument(
+          "-warningsAsErrors", "codes",
+          "treat specific warnings as errors; comma-separated list of\n" +
+          "integer warning codes; when triggered, SANY exits with failure", true));
+      variant.add(new UsageGenerator.Argument(
           "-d", "Opens the semantic graph explorer prompt. The prompt accepts the following commands:\n" +
           "'cst' Prints out the concrete syntax tree.\n" +
           "'dot' Emits the semantic graph to a ModuleName.dot file in the DOT graph" +
@@ -470,6 +574,10 @@ public class SANY {
       printUsage();
       throw new SANYExitException(SanyExitCode.ERROR, "No arguments provided");
     }
+    // Reset per-run state
+    suppressedCodes = new HashSet<>();
+    warningsAsErrorCodes = new HashSet<>();
+
     int i;
     // Parse and process the command line switches, which are
     // distinguished by the fact that they begin with a '-' character.
@@ -490,6 +598,52 @@ public class SANY {
       }
       else if (args[i].toLowerCase().equals("-error-codes"))
            doStrictErrorCodes = true;
+      else if (args[i].toLowerCase().equals("-suppressmessages")) {
+           i++;
+           if (i >= args.length) {
+             ToolIO.out.println("Error: -suppressMessages requires a comma-separated list of codes.");
+             throw new SANYExitException(SanyExitCode.ERROR, "-suppressMessages requires an argument");
+           }
+           for (String token : args[i].split(",")) {
+             token = token.trim();
+             try {
+               final int code = Integer.parseInt(token);
+               ErrorCode.fromStandardValue(code); // validate; throws if unknown
+               suppressedCodes.add(code);
+             } catch (NumberFormatException nfe) {
+               ToolIO.out.println("Error: -suppressMessages: not an integer: " + token);
+               throw new SANYExitException(SanyExitCode.ERROR, "-suppressMessages: not an integer: " + token);
+             } catch (IllegalArgumentException iae) {
+               ToolIO.out.println("Error: -suppressMessages: unknown message code: " + token);
+               throw new SANYExitException(SanyExitCode.ERROR, "-suppressMessages: unknown code: " + token);
+             }
+           }
+      }
+      else if (args[i].toLowerCase().equals("-warningsaserrors")) {
+           i++;
+           if (i >= args.length) {
+             ToolIO.out.println("Error: -warningsAsErrors requires a comma-separated list of codes.");
+             throw new SANYExitException(SanyExitCode.ERROR, "-warningsAsErrors requires an argument");
+           }
+           for (String token : args[i].split(",")) {
+             token = token.trim();
+             try {
+               final int code = Integer.parseInt(token);
+               final ErrorCode errorCode = ErrorCode.fromStandardValue(code); // validate; throws if unknown
+               if (errorCode.getSeverityLevel() != ErrorCode.ErrorLevel.WARNING) {
+                 ToolIO.out.println("Error: -warningsAsErrors: code " + token + " is not a warning-level code.");
+                 throw new SANYExitException(SanyExitCode.ERROR, "-warningsAsErrors: not a warning code: " + token);
+               }
+               warningsAsErrorCodes.add(code);
+             } catch (NumberFormatException nfe) {
+               ToolIO.out.println("Error: -warningsAsErrors: not an integer: " + token);
+               throw new SANYExitException(SanyExitCode.ERROR, "-warningsAsErrors: not an integer: " + token);
+             } catch (IllegalArgumentException iae) {
+               ToolIO.out.println("Error: -warningsAsErrors: unknown message code: " + token);
+               throw new SANYExitException(SanyExitCode.ERROR, "-warningsAsErrors: unknown code: " + token);
+             }
+           }
+      }
       else if (args[i].toLowerCase().equals("-help")) {
            printUsage();
            return;
@@ -538,7 +692,9 @@ public class SANY {
                   SANY.doSemanticAnalysis,
                   SANY.doLevelChecking,
                   SANY.doLinting,
-                  SANY.doValidatePCalTranslationDefault
+                  SANY.doValidatePCalTranslationDefault,
+                  SANY.suppressedCodes,
+                  SANY.warningsAsErrorCodes
               );
               final SanyExitCode result = parse(spec, args[i], out, settings);
               if (result != SanyExitCode.OK) {

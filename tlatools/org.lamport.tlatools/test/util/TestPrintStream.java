@@ -60,10 +60,9 @@ public class TestPrintStream extends PrintStream {
 	}
 	
 	public void assertSubstring(String substring) {
-		for (String string : strings) {
-			if (string.contains(substring)) {
-				return;
-			}
+		String combinedString = String.join("\n", strings);
+		if (combinedString.contains(substring)) {
+			return;
 		}
 		fail("Substring not found");
 	}
